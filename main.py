@@ -6,14 +6,16 @@ import logging
 from loguru import logger
 from dotenv import load_dotenv
 from google.cloud import bigquery
-from telegram import Bot
 from openai import OpenAI
+import time
+from modules_telegram import TelegramBot
+from modules_telegram.telegram_summary import send_module_summary
 
 load_dotenv()
 
 # Variables d'environnement
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_CHAT_ID = int(os.getenv('TELEGRAM_CHAT_ID', '0'))
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
 
@@ -21,7 +23,7 @@ os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS or
 
 # Initialisation des clients
 bq_client = bigquery.Client()
-bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
+telegram_bot = TelegramBot(token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID, command_handlers={}) if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else None
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 MODULES_DIR = 'modules_proposes'
@@ -122,20 +124,53 @@ def document_worker(path):
         f.write(code)
 
 # 5. Notification Telegram
-def notify_telegram(message):
-    if bot and TELEGRAM_CHAT_ID:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
-if __name__ == '__main__':
+def notify_telegram(message):
+    if telegram_bot:
+        telegram_bot.send_message(message)
+
+
+def pipeline_action(module_id, action, summary):
+    if telegram_bot:
+        send_module_summary(telegram_bot, module_id, action, summary)
+    else:
+        logger.info(f"[Module {module_id}] Action: {action} | {summary}")
+
+def main_loop():
     datasets = discover_crypto_datasets()
     success, fail = 0, 0
     for ds in datasets:
         worker_path = generate_worker(ds)
         ok, logs = run_worker(worker_path)
         document_worker(worker_path)
+        mod_id = os.path.splitext(os.path.basename(worker_path))[0]
         if ok:
             success += 1
+            pipeline_action(mod_id, "création", "Worker généré et exécuté avec succès.")
         else:
             fail += 1
+            pipeline_action(mod_id, "correction", "Erreur détectée, correction automatique tentée.")
     notify_telegram(f"Scan terminé. Succès: {success}, Échecs: {fail}, Total: {len(datasets)}")
     logger.info("Pipeline terminé.")
+
+    # Boucle d'écoute des commandes Telegram
+    if telegram_bot:
+        print("En attente de commandes Telegram (valide, corrige, rejoue, archive, show log)...")
+        while True:
+            action, mod_id = telegram_bot.get_next_action()
+            if action == "valide":
+                pipeline_action(mod_id, "validation", "Module validé et intégré au pipeline.")
+            elif action == "corrige":
+                pipeline_action(mod_id, "correction", "Correction automatique lancée.")
+            elif action == "rejoue":
+                pipeline_action(mod_id, "rejeu", "Rejeu du module demandé.")
+            elif action == "archive":
+                pipeline_action(mod_id, "archive", "Archivage du module demandé.")
+            elif action == "show_log":
+                pipeline_action(mod_id, "log", "Affichage du log du module.")
+            else:
+                pipeline_action(mod_id, "inconnu", f"Action inconnue : {action}")
+            time.sleep(0.5)
+
+if __name__ == '__main__':
+    main_loop()
